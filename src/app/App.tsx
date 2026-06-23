@@ -519,15 +519,72 @@ function SurveyScreen({
   );
 }
 
+// ─── Screen: Error ─────────────────────────────────────────────────────────────
+function ErrorScreen({
+  message,
+  onClose,
+}: {
+  message: string;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      style={{ background: "#f4f4f4", minHeight: "100vh", fontFamily: SERIF }}
+      className="flex flex-col w-full"
+    >
+      <Header showStreak={false} />
+
+      <div className="flex-1 flex flex-col items-center justify-center px-8 pb-10">
+        <p
+          className="text-center mb-6"
+          style={{ fontFamily: SERIF, fontSize: 22, color: "#282828", lineHeight: 1.5 }}
+        >
+          Something went wrong while checking sustainability:
+        </p>
+        <div
+          className="w-full rounded-[20px] px-5 py-4 mb-8"
+          style={{ background: "#ebddc2" }}
+        >
+          <p
+            className="text-center"
+            style={{ fontFamily: SERIF, fontSize: 16, color: "#282828", lineHeight: 1.5 }}
+          >
+            {message}
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          style={{
+            background: "#7db493",
+            borderRadius: 40,
+            fontFamily: SERIF,
+            fontSize: 24,
+            color: "#282828",
+            border: "none",
+            cursor: "pointer",
+            padding: "10px 0",
+            width: "100%",
+            maxWidth: 300,
+          }}
+        >
+          Try Again
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Root App ─────────────────────────────────────────────────────────────────
-type Screen = "intro" | "loading" | "report" | "survey-close" | "survey-chosen";
+type Screen = "intro" | "loading" | "report" | "survey-close" | "survey-chosen" | "error";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("intro");
   const [report, setReport] = useState<ReportData | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [surveySelection, setSurveySelection] = useState<number | null>(null);
 
   const handleStart = () => {
+    setError(null);
     setScreen("loading");
 
     // In extension context: ask background worker for report data
@@ -537,8 +594,13 @@ export default function App() {
         chrome.runtime.sendMessage(
           { type: "LOOKUP", productUrl: url },
           (response) => {
-            setReport(response?.data ?? null);
-            setScreen("report");
+            if (response?.success === false) {
+              setError(response.error || "Something went wrong while checking sustainability.");
+              setScreen("error");
+            } else {
+              setReport(response?.data ?? null);
+              setScreen("report");
+            }
           }
         );
       });
@@ -562,6 +624,11 @@ export default function App() {
     setScreen("intro");
     setReport(null);
     setSurveySelection(null);
+  };
+
+  const handleErrorClose = () => {
+    setScreen("intro");
+    setError(null);
   };
 
   switch (screen) {
@@ -592,6 +659,8 @@ export default function App() {
           onClose={handleSurveyClose}
         />
       );
+    case "error":
+      return <ErrorScreen message={error ?? "Unknown error"} onClose={handleErrorClose} />;
     default:
       return <IntroScreen onStart={handleStart} />;
   }

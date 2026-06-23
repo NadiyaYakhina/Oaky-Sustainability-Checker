@@ -1,111 +1,130 @@
-// Background service worker for Oaky extension.
-// Currently returns placeholder data — replace PLACEHOLDER_REPORT with a real API call.
+// src/background/service-worker.ts
+
+const API_BASE = "http://127.0.0.1:8000";
 
 export interface ReportData {
   overallScore: number;        // 1–10
   brandReputation: number;     // 1–10
   materialComposition: number; // 1–10
-  numberOfWears: number;       // 0–1000+
+  numberOfWears: number;
 }
 
-export interface LookupRequest {
+type LookupMessage = {
   type: "LOOKUP";
-  productUrl: string;
-  productName?: string;
-  brandName?: string;
-}
-
-export interface LookupResponse {
-  type: "LOOKUP_RESULT";
-  data: ReportData;
-  error?: string;
-}
-
-// PLACEHOLDER — replace with real sustainability API call
-const PLACEHOLDER_REPORT: ReportData = {
-  overallScore: 5,
-  brandReputation: 6,
-  materialComposition: 3,
-  numberOfWears: 50,
+  productUrl?: string;
 };
 
-async function fetchSustainabilityReport(request: LookupRequest): Promise<ReportData> {
-  // TODO: Replace this with a real API call to your sustainability backend:
-  //
-  // const response = await fetch("https://your-api.example.com/report", {
-  //   method: "POST",
-  //   headers: { "Content-Type": "application/json" },
-  //   body: JSON.stringify({
-  //     url: request.productUrl,
-  //     productName: request.productName,
-  //     brandName: request.brandName,
-  //   }),
-  // });
-  // return response.json();
-
-  // Simulate network delay
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-  return PLACEHOLDER_REPORT;
+function scoreTo10(value?: number): number {
+  if (value === undefined || value === null || Number.isNaN(value)) return 5;
+  return Math.max(1, Math.min(10, Math.round(value / 10)));
 }
 
-chrome.runtime.onMessage.addListener((message: LookupRequest, _sender, sendResponse) => {
-  if (message.type === "LOOKUP") {
-    fetchSustainabilityReport(message)
-      .then((data) => sendResponse({ type: "LOOKUP_RESULT", data } as LookupResponse))
-      .catch((err) => sendResponse({ type: "LOOKUP_RESULT", data: PLACEHOLDER_REPORT, error: String(err) } as LookupResponse));
-    return true; // keep channel open for async response
+function estimateWears(finalScore?: number): number {
+  if (!finalScore) return 50;
+  if (finalScore >= 80) return 100;
+  if (finalScore >= 70) return 80;
+  if (finalScore >= 50) return 50;
+  if (finalScore >= 30) return 35;
+  return 20;
+}
+
+function extractBrandFromUrl(url?: string): string {
+  if (!url) return "Unknown";
+
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+
+    if (host.includes("hm") || host.includes("handm")) return "H&M";
+    if (host.includes("zara") || host.includes("inditex")) return "Zara";
+    if (host.includes("mango")) return "Mango";
+    if (host.includes("cos")) return "COS";
+    if (host.includes("uniqlo")) return "Uniqlo";
+    if (host.includes("nike")) return "Nike";
+    if (host.includes("adidas")) return "Adidas";
+
+    return host.split(".")[0].replace(/-/g, " ");
+  } catch {
+    return "Unknown";
   }
-});
-
-// The integrated side panel is provided via the `side_panel` manifest key
-// and served from `sidebar.html`. No window-creation code is required.
-
-function openFallbackWindow() {
-  return chrome.windows
-    .create({
-      url: chrome.runtime.getURL('sidebar.html'),
-      type: 'popup',
-      width: 420,
-      height: 800,
-    })
-    .then(() => {
-      try {
-        if (chrome.notifications && typeof chrome.notifications.create === 'function') {
-          chrome.notifications.create({
-            type: 'basic',
-            iconUrl: 'icons/icon128.png',
-            title: 'Oaky',
-            message: 'Side panel could not be opened — opened fallback window.',
-          } as any)
-        } else {
-          console.log('Side panel could not be opened — opened fallback window.')
-        }
-      } catch (e) {
-        console.log('Fallback notification could not be shown.')
-      }
-    })
-    .catch((err) => {
-      console.error('Fallback window could not be opened.', err)
-    })
 }
 
-// Programmatically open the side panel when the toolbar action is clicked.
-// chrome.sidePanel.open() requires a tabId or windowId, and it only works from
-// a user gesture such as chrome.action.onClicked.
-chrome.action.onClicked.addListener((tab) => {
-  const sp = (chrome as any).sidePanel
+function extractDomainFromUrl(url?: string): string | null {
+  if (!url) return null;
 
-  const openSidePanel = () => {
-    if (!sp || typeof sp.open !== 'function') {
-      return Promise.reject(new Error('chrome.sidePanel.open is unavailable'))
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+chrome.runtime.onMessage.addListener(
+  (message: LookupMessage, sender, sendResponse) => {
+    if (message.type !== "LOOKUP") {
+      return false;
     }
 
-    const options = tab.id ? { tabId: tab.id } : { windowId: tab.windowId }
-    return sp.open(options)
-  }
+    const brandName = extractBrandFromUrl(message.productUrl);
+    const officialDomain = extractDomainFromUrl(message.productUrl);
 
-  openSidePanel().catch((err) => {
-    console.warn('Could not open the side panel; opening fallback window.', err)
-    openFallbackWindow()
-  })
-})
+    fetch(`${API_BASE}/audit`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        brand_name: brandName,
+        official_domain: officialDomain
+      })
+    })
+      .then(async (res) => {
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.detail || data.error || `Backend returned ${res.status}`);
+        }
+
+        const finalScore = data.sustainability_summary?.final_score;
+        const scores = data.scores || {};
+
+        const report: ReportData = {
+          overallScore: scoreTo10(finalScore),
+          brandReputation: scoreTo10(
+            scores.public_perception ?? scores.authenticity_score
+          ),
+          materialComposition: scoreTo10(scores.material_analysis),
+          numberOfWears: estimateWears(finalScore)
+        };
+
+        sendResponse({
+          success: true,
+          data: report,
+
+          // Extra backend data is included here for future UI upgrades.
+          rawAudit: data,
+          recommendation: data.sustainability_summary?.recommendation,
+          recommendationExplanation: data.recommendation_explanation || [],
+          evidenceLinks: data.evidence_links || [],
+          detailedScores: data.scores || {},
+          brandMaterialSummary: data.brand_material_summary || {},
+          certificationsFound: data.certifications_found || []
+        });
+      })
+      .catch((error) => {
+        console.error("Oaky backend lookup failed:", error);
+
+        sendResponse({
+          success: false,
+          error: error.message,
+          data: {
+            overallScore: 5,
+            brandReputation: 5,
+            materialComposition: 5,
+            numberOfWears: 50
+          }
+        });
+      });
+
+    return true;
+  }
+);
